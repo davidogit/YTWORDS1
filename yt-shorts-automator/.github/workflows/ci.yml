@@ -1,0 +1,26 @@
+name: Daily Short Generator
+on:
+  schedule:
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+
+jobs:
+  produce-short:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install ffmpeg python3-pip
+          pip3 install edge-tts
+      - name: Install NPM Packages
+        run: npm ci
+      - name: Produce and Upload Short
+        env:
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          # ... add other secrets here
+        run: npm run produce

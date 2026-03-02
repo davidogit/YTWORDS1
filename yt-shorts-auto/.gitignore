@@ -1,0 +1,11 @@
+node_modules/
+dist/
+output/
+db/*.db
+.env
+*.mp3
+*.mp4
+*.wav
+*_props.json
+.DS_Store
+.claude

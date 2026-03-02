@@ -1,0 +1,25 @@
+{
+  "name": "yt-shorts-automator",
+  "version": "1.0.0",
+  "scripts": {
+    "produce": "ts-node src/cli.ts",
+    "dev:remotion": "remotion preview remotion/Root.tsx",
+    "build": "tsc",
+    "test": "jest"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.0",
+    "dotenv": "^16.4.5",
+    "fluent-ffmpeg": "^2.1.3",
+    "googleapis": "^133.0.0",
+    "openai": "^4.28.0",
+    "remotion": "4.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.9",
+    "@types/fluent-ffmpeg": "^2.1.24",
+    "@types/node": "^20.11.24",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}

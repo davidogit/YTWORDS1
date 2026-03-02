@@ -1,0 +1,71 @@
+name: Daily Shorts (3x/day)
+
+on:
+  schedule:
+    # Staggered posts targeting US audience peak times
+    - cron: '0 13 * * *'   # 9 AM ET — morning post
+    - cron: '0 18 * * *'   # 2 PM ET — afternoon post
+    - cron: '0 23 * * *'   # 7 PM ET — evening post
+  workflow_dispatch: # Allow manual trigger from GitHub UI
+
+jobs:
+  produce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          pip install edge-tts
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # Restore the SQLite database from artifact (persist across runs)
+      - name: Restore database
+        uses: actions/download-artifact@v4
+        with:
+          name: words-db
+          path: db/
+        continue-on-error: true # First run won't have an artifact
+
+      - name: Run pipeline
+        run: npm run produce
+        env:
+          # Reddit
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
+          REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
+          # YouTube
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          # TTS
+          TTS_ENGINE: edge-tts
+          TTS_VOICE: en-US-AriaNeural
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          # LLM for script generation
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          # Video backgrounds
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+
+      # Save the database for the next run
+      - name: Save database
+        uses: actions/upload-artifact@v4
+        with:
+          name: words-db
+          path: db/words.db
+          retention-days: 90
+        if: always()
