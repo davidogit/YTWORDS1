@@ -6,7 +6,17 @@ export type ShortFormat =
   | 'misused-word'      // "Affect vs Effect in 20 seconds"
   | 'funny-meaning'     // "The English word for someone who loves rain"
   | 'emotional-word'    // petrichor, sonder, hiraeth — feelings you couldn't name
-  | 'guess-the-word';   // interactive: definition first → pause → reveal
+  | 'guess-the-word'    // interactive: 4 options shown, correct reveals after pause
+  | 'scrabble-word';    // board-game edge: high-value, surprising, valid Scrabble words
+
+// ─── Quiz Option ─────────────────────────────────────────────────────────────
+
+/** One of four definition options shown in the guess-the-word quiz card */
+export interface QuizOption {
+  text: string;     // The definition shown in the card
+  correct: boolean; // Whether this is the correct answer
+  label: string;    // 'A', 'B', 'C', or 'D'
+}
 
 // ─── Core pipeline interfaces ───────────────────────────────────────────────
 
@@ -55,15 +65,17 @@ export interface ValidationResult {
 
 /** Generated script for the Short */
 export interface ShortScript {
-  hook: string;          // 2–5 s spoken hook, e.g. "Did you know there's a word for..."
-  pronunciation: string; // "The word is susurrus, pronounced /suːˈsʌɹəs/"
-  definition: string;    // 10–20 s simple definition with examples
-  cta: string;           // 2–3 s CTA, e.g. "Follow for more fun words!"
+  hook: string;          // 2–5 s spoken hook
+  pronunciation: string; // "The word is susurrus."
+  definition: string;    // 10–20 s simple definition
+  cta: string;           // 2–3 s CTA
   fullText: string;      // Concatenated script for TTS
-  estimatedDuration: number; // seconds (word count / ~2.5 words per sec)
-  format: ShortFormat;       // which content format this script uses
-  pauseAfterHook?: boolean;  // for guess-the-word: insert a pause before reveal
-  versusWord?: string;       // for misused-word: the word it's commonly confused with
+  estimatedDuration: number; // seconds
+  format: ShortFormat;
+  pauseAfterHook?: boolean;  // insert a pause before reveal (guess-the-word)
+  versusWord?: string;       // for misused-word
+  quizOptions?: QuizOption[]; // for guess-the-word: 4 definition options (1 correct, 3 distractors)
+  scrabbleScore?: number;     // for scrabble-word: approximate Scrabble point value
 }
 
 /** A single word with timing from TTS subtitles */
@@ -75,66 +87,50 @@ export interface CaptionWord {
 
 /** TTS output */
 export interface TTSResult {
-  audioPath: string;     // Path to .mp3/.wav voiceover file
+  audioPath: string;
   durationSec: number;
-  engine: string;        // Which engine was used
-  subtitlePath?: string; // Path to .vtt subtitle file (if generated)
-  captions?: CaptionWord[]; // Word-level timing data parsed from VTT
+  engine: string;
+  subtitlePath?: string;
+  captions?: CaptionWord[];
 }
 
 /** A scheduled sound effect event */
 export interface SFXEvent {
-  sfxPath: string;       // Path to the SFX audio file
-  startSec: number;      // When to play (seconds from start)
-  volume: number;        // 0–1, typically 0.2–0.4
+  sfxPath: string;
+  startSec: number;
+  volume: number;
 }
 
 /** Audio mixing output */
 export interface AudioMixResult {
   mixedAudioPath: string;
   durationSec: number;
-  musicTrack: string;    // Which background track was used
+  musicTrack: string;
 }
 
-/** The main pipeline item — passes through every stage */
+/** The main pipeline item */
 export interface PipelineItem {
-  id: string;             // UUID
+  id: string;
   word: string;
   status: PipelineStatus;
-
-  // Discovery
   source: WordCandidate['source'];
   sourceUrl?: string;
   subreddit?: string;
-
-  // Dictionary
   ipa?: string;
   definition?: string;
   partOfSpeech?: string;
-
-  // Validation
   qualityScore?: number;
-
-  // Script
   hook?: string;
   script?: ShortScript;
-
-  // Audio
   voiceoverPath?: string;
   mixedAudioPath?: string;
   musicTrack?: string;
-
-  // Video
   videoPath?: string;
   thumbnailPath?: string;
   durationSec?: number;
-
-  // Upload
   youtubeVideoId?: string;
   youtubeUrl?: string;
   uploadedAt?: string;
-
-  // Meta
   createdAt: string;
   updatedAt: string;
   error?: string;
@@ -197,9 +193,9 @@ export interface CLIOptions {
   dryRun: boolean;
   noUpload: boolean;
   source: 'reddit' | 'rss' | 'fallback' | 'manual';
-  word?: string;          // --word=susurrus to force a specific word
+  word?: string;
   verbose: boolean;
-  batch: number;          // --batch=3 to produce multiple videos in one run
-  schedule?: string;      // --schedule "9:10pm GMT" — ISO datetime for scheduled publish
-  format?: ShortFormat;   // --format=emotional-word to force a specific format
+  batch: number;
+  schedule?: string;
+  format?: ShortFormat;
 }

@@ -2,9 +2,9 @@
  * discoverFallback.ts — Fallback word discovery when Reddit / RSS is unavailable.
  *
  * Sources:
- *   1. Format-specific curated lists (emotional, funny, misused)
- *   2. Random Word API (https://random-word-api.herokuapp.com)
- *   3. Wordnik Random Words (if API key is set)
+ *   1. Format-specific curated lists (emotional, funny, misused, scrabble)
+ *   2. Random Word API
+ *   3. Wordnik Random Words (if API key set)
  *   4. General curated "interesting words" list (built-in)
  */
 
@@ -12,14 +12,91 @@ import { config } from '../config.js';
 import { moduleLogger } from '../utils/logger.js';
 import { isDuplicate } from '../utils/db.js';
 import { withRetry } from '../utils/retry.js';
-import type { WordCandidate } from '../types/index.js';
-import type { ShortFormat } from '../types/index.js';
+import type { WordCandidate, ShortFormat } from '../types/index.js';
 
 const log = moduleLogger('discoverFallback');
 
+// ── Scrabble Edge Words ────────────────────────────────────────────────────
+// Valid in both TWL (North America) and SOWPODS (international) unless noted.
+// Organised by category so hooks can reference the angle.
+
+export interface ScrabbleWord {
+  word: string;
+  score: number;       // approximate base Scrabble score (no multipliers)
+  category: string;   // 'q-no-u' | 'two-letter' | 'z-heavy' | 'x-heavy' | 'j-heavy' | 'power'
+  hint: string;       // short angle for the hook (1–2 words, e.g. "Q without U")
+}
+
+export const SCRABBLE_WORDS: readonly ScrabbleWord[] = [
+  // ── Q without U — the ultimate Scrabble flex ───────────────────────────
+  { word: 'qi',      score: 11, category: 'q-no-u',     hint: 'Q without U' },
+  { word: 'qoph',   score: 18, category: 'q-no-u',     hint: 'Q without U' },
+  { word: 'qadi',   score: 14, category: 'q-no-u',     hint: 'Q without U' },
+  { word: 'qaid',   score: 14, category: 'q-no-u',     hint: 'Q without U' },
+  { word: 'qanat',  score: 15, category: 'q-no-u',     hint: 'Q without U' },
+  { word: 'qat',    score: 12, category: 'q-no-u',     hint: 'Q without U' },
+  { word: 'tranq',  score: 14, category: 'q-no-u',     hint: 'Q without U' },
+  { word: 'waqf',   score: 18, category: 'q-no-u',     hint: 'Q without U' },
+  { word: 'qoph',   score: 18, category: 'q-no-u',     hint: 'Q without U' },
+
+  // ── Two-letter power words — tiny, devastating ─────────────────────────
+  { word: 'za',  score: 11, category: 'two-letter', hint: '2-letter word' },
+  { word: 'xi',  score: 9,  category: 'two-letter', hint: '2-letter word' },
+  { word: 'xu',  score: 9,  category: 'two-letter', hint: '2-letter word' },
+  { word: 'aa',  score: 2,  category: 'two-letter', hint: '2-letter word' },
+  { word: 'oe',  score: 2,  category: 'two-letter', hint: '2-letter word' },
+  { word: 'jo',  score: 9,  category: 'two-letter', hint: '2-letter word' },
+  { word: 'ka',  score: 6,  category: 'two-letter', hint: '2-letter word' },
+  { word: 'qi',  score: 11, category: 'two-letter', hint: '2-letter word' },
+
+  // ── Z-heavy scorers ────────────────────────────────────────────────────
+  { word: 'zax',     score: 19, category: 'z-heavy', hint: 'Z word' },
+  { word: 'zebu',    score: 15, category: 'z-heavy', hint: 'Z word' },
+  { word: 'zloty',   score: 17, category: 'z-heavy', hint: 'Z word' },
+  { word: 'zoea',    score: 13, category: 'z-heavy', hint: 'Z word' },
+  { word: 'kazoo',   score: 18, category: 'z-heavy', hint: 'Z word' },
+  { word: 'plotz',   score: 16, category: 'z-heavy', hint: 'Z word' },
+  { word: 'glitz',   score: 15, category: 'z-heavy', hint: 'Z word' },
+  { word: 'blitz',   score: 16, category: 'z-heavy', hint: 'Z word' },
+  { word: 'spritz',  score: 17, category: 'z-heavy', hint: 'Z word' },
+  { word: 'snazzy',  score: 24, category: 'z-heavy', hint: 'Z word' },
+  { word: 'pizzazz', score: 43, category: 'z-heavy', hint: 'Z word' },
+  { word: 'zoeae',   score: 14, category: 'z-heavy', hint: 'Z word' },
+  { word: 'bezique', score: 24, category: 'z-heavy', hint: 'Z word' },
+  { word: 'zymurgy', score: 24, category: 'z-heavy', hint: 'Z word' },
+  { word: 'kvetch',  score: 18, category: 'z-heavy', hint: 'rare word' },
+  { word: 'fizgig',  score: 19, category: 'z-heavy', hint: 'Z word' },
+
+  // ── X scorers ──────────────────────────────────────────────────────────
+  { word: 'xi',    score: 9,  category: 'x-heavy', hint: 'X word' },
+  { word: 'xu',    score: 9,  category: 'x-heavy', hint: 'X word' },
+  { word: 'zax',   score: 19, category: 'x-heavy', hint: 'X word' },
+  { word: 'oxazine', score: 24, category: 'x-heavy', hint: 'X word' },
+
+  // ── J scorers ──────────────────────────────────────────────────────────
+  { word: 'jato',  score: 11, category: 'j-heavy', hint: 'J word' },
+  { word: 'jeux',  score: 17, category: 'j-heavy', hint: 'J word' },
+  { word: 'jinx',  score: 17, category: 'j-heavy', hint: 'J word' },
+
+  // ── High-value power words — valid, surprising, rarely played ──────────
+  { word: 'muzjiks',  score: 28, category: 'power', hint: 'highest-scoring' },
+  { word: 'cazique',  score: 27, category: 'power', hint: 'power play' },
+  { word: 'squab',    score: 17, category: 'power', hint: 'power play' },
+  { word: 'quaff',    score: 20, category: 'power', hint: 'power play' },
+  { word: 'frowzy',   score: 21, category: 'power', hint: 'power play' },
+  { word: 'woozy',    score: 18, category: 'power', hint: 'power play' },
+  { word: 'squelch',  score: 22, category: 'power', hint: 'power play' },
+  { word: 'squib',    score: 17, category: 'power', hint: 'power play' },
+  { word: 'quetzal',  score: 24, category: 'power', hint: 'power play' },
+  { word: 'chutzpah', score: 25, category: 'power', hint: 'power play' },
+  { word: 'schmaltz', score: 24, category: 'power', hint: 'power play' },
+  { word: 'kudzu',    score: 19, category: 'power', hint: 'power play' },
+];
+
+// Just the word strings for easy dedup checks
+export const SCRABBLE_WORDS_SET = new Set(SCRABBLE_WORDS.map((w) => w.word));
+
 // ── Emotional / untranslatable words ──────────────────────────────────────
-// Words that describe feelings people have but couldn't name.
-// These are the highest-performing format.
 
 export const EMOTIONAL_WORDS: readonly string[] = [
   'petrichor', 'sonder', 'hiraeth', 'saudade', 'limerence',
@@ -27,16 +104,14 @@ export const EMOTIONAL_WORDS: readonly string[] = [
   'jouska', 'ellipsism', 'altschmerz', 'occhiolism', 'kenopsia',
   'vemödalen', 'anecdoche', 'nodus', 'exulansis', 'zenosyne',
   'opia', 'kuebiko', 'lachesism', 'rubatosis', 'énouement',
-  'adronitis', 'catoptric', 'rückkehr', 'pâro', 'mauerbauertraurigkeit',
-  'ambedo', 'avenoir', 'daguerreologue', 'koinophobia', 'vellichor',
-  'desiderium', 'sehnsucht', 'meraki', 'wanderlust', 'wabi',
-  'mono', 'aware', 'yugen', 'gezelligheid', 'hygge',
-  'fernweh', 'weltschmerz', 'schadenfreude', 'torschlusspanik', 'schnapsidee',
-  'forelsket', 'gigil', 'mamihlapinatapai', 'natsukashii', 'wabi-sabi',
+  'adronitis', 'rückkehr', 'pâro', 'mauerbauertraurigkeit',
+  'ambedo', 'avenoir', 'koinophobia', 'desiderium', 'sehnsucht',
+  'meraki', 'wanderlust', 'fernweh', 'weltschmerz', 'schadenfreude',
+  'torschlusspanik', 'forelsket', 'gigil', 'mamihlapinatapai',
+  'natsukashii', 'wabi-sabi', 'mono', 'yugen', 'gezelligheid', 'hygge',
 ];
 
-// ── Funny / oddly specific English words ─────────────────────────────────
-// Real words with unexpectedly specific or hilarious meanings.
+// ── Funny / oddly specific English words ──────────────────────────────────
 
 export const FUNNY_MEANING_WORDS: readonly string[] = [
   'bumfuzzle', 'cattywampus', 'collywobbles', 'flibbertigibbet',
@@ -44,46 +119,41 @@ export const FUNNY_MEANING_WORDS: readonly string[] = [
   'snollygoster', 'taradiddle', 'whippersnapper', 'absquatulate',
   'fudgel', 'crapulence', 'griffonage', 'blatherskite', 'callipygian',
   'erinaceous', 'jentacular', 'selcouth', 'yarborough', 'widdershins',
-  'ultracrepidarian', 'impignorate', 'quire', 'ninnyhammer', 'hobbledehoy',
+  'ultracrepidarian', 'impignorate', 'ninnyhammer', 'hobbledehoy',
   'lickspittle', 'skullduggery', 'muckraker', 'balderdash', 'codswallop',
   'flapdoodle', 'rigmarole', 'tomfoolery', 'shenanigans', 'kerfuffle',
   'brouhaha', 'hullabaloo', 'discombobulate', 'flummox', 'bamboozle',
   'gobsmacked', 'flabbergasted', 'befuddled', 'persnickety', 'lackadaisical',
-  'lollipop', 'snickerdoodle', 'bumfuzzle', 'widdershins', 'flibbertigibbet',
 ];
 
 // ── Misused word pairs ─────────────────────────────────────────────────────
-// Common words people confuse or misuse. The pipeline uses `target` as the
-// word to look up, `versus` as the one it's confused with.
 
 export const MISUSED_WORD_PAIRS: readonly { target: string; versus: string }[] = [
-  { target: 'affect',       versus: 'effect' },
-  { target: 'fewer',        versus: 'less' },
-  { target: 'who',          versus: 'whom' },
-  { target: 'lie',          versus: 'lay' },
-  { target: 'imply',        versus: 'infer' },
-  { target: 'comprise',     versus: 'compose' },
+  { target: 'affect',        versus: 'effect' },
+  { target: 'fewer',         versus: 'less' },
+  { target: 'who',           versus: 'whom' },
+  { target: 'lie',           versus: 'lay' },
+  { target: 'imply',         versus: 'infer' },
+  { target: 'comprise',      versus: 'compose' },
   { target: 'disinterested', versus: 'uninterested' },
-  { target: 'envy',         versus: 'jealousy' },
-  { target: 'literally',    versus: 'figuratively' },
-  { target: 'ironic',       versus: 'coincidental' },
-  { target: 'nauseous',     versus: 'nauseated' },
-  { target: 'peruse',       versus: 'skim' },
-  { target: 'bemused',      versus: 'amused' },
-  { target: 'infamous',     versus: 'famous' },
-  { target: 'fortuitous',   versus: 'fortunate' },
-  { target: 'enormity',     versus: 'enormousness' },
-  { target: 'nonplussed',   versus: 'unfazed' },
-  { target: 'ambiguous',    versus: 'ambivalent' },
-  { target: 'aggravate',    versus: 'irritate' },
-  { target: 'anxious',      versus: 'eager' },
+  { target: 'envy',          versus: 'jealousy' },
+  { target: 'literally',     versus: 'figuratively' },
+  { target: 'ironic',        versus: 'coincidental' },
+  { target: 'nauseous',      versus: 'nauseated' },
+  { target: 'peruse',        versus: 'skim' },
+  { target: 'bemused',       versus: 'amused' },
+  { target: 'infamous',      versus: 'famous' },
+  { target: 'fortuitous',    versus: 'fortunate' },
+  { target: 'enormity',      versus: 'enormousness' },
+  { target: 'nonplussed',    versus: 'unfazed' },
+  { target: 'ambiguous',     versus: 'ambivalent' },
+  { target: 'aggravate',     versus: 'irritate' },
+  { target: 'anxious',       versus: 'eager' },
 ];
 
 // ── General curated "interesting words" ───────────────────────────────────
-// Pre-vetted for the word-of-the-day / guess-the-word formats.
 
 export const CURATED_WORDS: readonly string[] = [
-  // ── Original classics ──────────────────────────────────────────────────
   'petrichor', 'susurrus', 'defenestration', 'sonder', 'ephemeral',
   'limerence', 'serendipity', 'mellifluous', 'phosphenes', 'vellichor',
   'ethereal', 'luminescence', 'quintessence', 'oblivion', 'lacuna',
@@ -94,69 +164,34 @@ export const CURATED_WORDS: readonly string[] = [
   'redolent', 'scintilla', 'sempiternal', 'tintinnabulation', 'umbra',
   'verisimilitude', 'wunderkind', 'zeitgeist', 'apricity', 'brontide',
   'clinomania', 'elysian', 'fernweh', 'gossamer', 'hiraeth',
-
-  // ── Sounds, music & aesthetics ────────────────────────────────────────
   'melisma', 'cacophony', 'euphony', 'sibilance', 'cadenza',
   'vibrato', 'tremolo', 'arpeggio', 'nocturne', 'dulcet',
-  'dulcimer', 'aubade', 'elegy', 'resonance', 'melancholy',
-
-  // ── Silly, humorous & playful ─────────────────────────────────────────
   'absquatulate', 'flibbertigibbet', 'kerfuffle', 'brouhaha', 'hullabaloo',
   'discombobulate', 'flummox', 'bamboozle', 'lollygag', 'shenanigans',
-  'balderdash', 'codswallop', 'flapdoodle', 'rigmarole', 'tomfoolery',
-
-  // ── Character & personality ───────────────────────────────────────────
   'sycophant', 'obsequious', 'perspicacious', 'sagacious', 'loquacious',
   'magnanimous', 'munificent', 'bellicose', 'truculent', 'recalcitrant',
   'querulous', 'fastidious', 'mercurial', 'phlegmatic', 'sanguine',
   'lachrymose', 'lugubrious', 'sardonic', 'irascible', 'intrepid',
-
-  // ── Intellectual & philosophical ──────────────────────────────────────
   'solipsism', 'onomatopoeia', 'circumlocution', 'tautology', 'quixotic',
   'sisyphean', 'equanimity', 'alacrity', 'acrimony', 'catharsis',
   'hubris', 'pathos', 'schadenfreude', 'weltanschauung', 'gestalt',
   'leitmotif', 'aphorism', 'hyperbole', 'synecdoche', 'episteme',
-
-  // ── Nature, cosmos & colour ───────────────────────────────────────────
   'syzygy', 'penumbra', 'aphelion', 'perihelion', 'aurora',
   'bioluminescence', 'phosphorescence', 'coruscation', 'effulgence', 'maelstrom',
   'riparian', 'sylvan', 'vernal', 'cerulean', 'vermillion',
-  'alabaster', 'obsidian', 'aureate', 'tenebrous', 'caliginous',
-
-  // ── Emotions & inner life ─────────────────────────────────────────────
   'desiderium', 'sehnsucht', 'meraki', 'wanderlust', 'poignant',
   'elegiac', 'valediction', 'solace', 'reverie', 'rumination',
-  'despondency', 'ambivalence', 'wistfulness', 'eudaimonia', 'apophenia',
-
-  // ── Vivid & evocative ────────────────────────────────────────────────
   'labyrinthine', 'ostentatious', 'nefarious', 'insidious', 'tenacious',
   'voracious', 'ubiquitous', 'luminous', 'resplendent', 'felicitous',
-  'propitious', 'auspicious', 'pernicious', 'deleterious', 'ignominious',
-  'egregious', 'obstreperous', 'mendacious', 'perfidious', 'truculent',
-
-  // ── Language & linguistics ────────────────────────────────────────────
   'neologism', 'portmanteau', 'palindrome', 'oxymoron', 'malapropism',
   'spoonerism', 'mondegreen', 'paraprosdokian', 'tmesis', 'eggcorn',
-
-  // ── Wonderfully obscure real English ─────────────────────────────────
-  'snollygoster', 'ultracrepidarian', 'mumpsimus', 'ninnyhammer',
-  'blatherskite', 'skullduggery', 'muckraker', 'hobbledehoy', 'lickspittle',
-
-  // ── Poetic & abstract ────────────────────────────────────────────────
   'simulacrum', 'palimpsest', 'archipelago', 'calliope', 'phantasmagoria',
-  'labyrinth', 'silhouette', 'conundrum', 'enigma', 'pellucid',
-  'crystalline', 'lustrous', 'translucent', 'diapason', 'incandescent',
 ];
 
-/** Set version for O(1) curated-word lookups in the validator */
 export const CURATED_WORDS_SET = new Set(CURATED_WORDS);
 
-// ── Format-aware discovery ────────────────────────────────────────────────
+// ── Format-aware discovery ─────────────────────────────────────────────────
 
-/**
- * Discover word candidates from the correct curated list for a given format.
- * Falls back to general curated list for word-of-the-day / guess-the-word.
- */
 export async function discoverByFormat(
   format: ShortFormat,
   limit = 10
@@ -173,8 +208,12 @@ export async function discoverByFormat(
     wordPool = [...MISUSED_WORD_PAIRS]
       .sort(() => Math.random() - 0.5)
       .map((p) => p.target);
+  } else if (format === 'scrabble-word') {
+    // Shuffle scrabble words, bias toward higher-scoring entries
+    wordPool = [...SCRABBLE_WORDS]
+      .sort((a, b) => (b.score - a.score) * Math.random() + (Math.random() - 0.5) * 5)
+      .map((w) => w.word);
   } else {
-    // word-of-the-day / guess-the-word — use the general curated list
     wordPool = [...CURATED_WORDS].sort(() => Math.random() - 0.5);
   }
 
@@ -184,7 +223,7 @@ export async function discoverByFormat(
   for (const word of wordPool) {
     if (seen.has(word)) continue;
     seen.add(word);
-    if (word.length < config.content.minWordLength) continue;
+    if (word.length < config.content.minWordLength && format !== 'scrabble-word') continue;
     if (word.length > config.content.maxWordLength) continue;
     if (isDuplicate(word)) continue;
 
@@ -205,9 +244,7 @@ export async function discoverByFormat(
 
 async function fetchRandomWords(count = 20): Promise<string[]> {
   try {
-    const resp = await fetch(
-      `https://random-word-api.herokuapp.com/word?number=${count}&length=7`
-    );
+    const resp = await fetch(`https://random-word-api.herokuapp.com/word?number=${count}&length=7`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return (await resp.json()) as string[];
   } catch (err) {
@@ -216,12 +253,9 @@ async function fetchRandomWords(count = 20): Promise<string[]> {
   }
 }
 
-// ── Wordnik Random Words (optional, needs API key) ─────────────────────────
-
 async function fetchWordnikRandom(count = 10): Promise<string[]> {
   const apiKey = config.dictionary.wordnikApiKey;
   if (!apiKey) return [];
-
   try {
     const url = `https://api.wordnik.com/v4/words.json/randomWords` +
       `?hasDictionaryDef=true&minCorpusCount=100&minLength=6&maxLength=18` +
@@ -236,25 +270,18 @@ async function fetchWordnikRandom(count = 10): Promise<string[]> {
   }
 }
 
-// ── Main Fallback Discovery ────────────────────────────────────────────────
-
 export async function discoverFromFallback(limit = 10): Promise<WordCandidate[]> {
   log.info('Using fallback word discovery');
-
   const allWords: string[] = [];
 
-  // Try external APIs first
   const [randomWords, wordnikWords] = await Promise.all([
     withRetry(() => fetchRandomWords(30), 'random-word-api', { maxAttempts: 2 }),
     fetchWordnikRandom(15),
   ]);
 
-  // Curated words come FIRST — they're pre-vetted as interesting.
   const shuffled = [...CURATED_WORDS].sort(() => Math.random() - 0.5);
-  allWords.push(...shuffled);
-  allWords.push(...randomWords, ...wordnikWords);
+  allWords.push(...shuffled, ...randomWords, ...wordnikWords);
 
-  // Filter: length, not duplicate
   const candidates: WordCandidate[] = [];
   const seen = new Set<string>();
 
@@ -266,12 +293,7 @@ export async function discoverFromFallback(limit = 10): Promise<WordCandidate[]>
     if (word.length > config.content.maxWordLength) continue;
     if (isDuplicate(word)) continue;
 
-    candidates.push({
-      word,
-      source: 'fallback',
-      discoveredAt: new Date().toISOString(),
-    });
-
+    candidates.push({ word, source: 'fallback', discoveredAt: new Date().toISOString() });
     if (candidates.length >= limit) break;
   }
 
