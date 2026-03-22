@@ -9,7 +9,8 @@
 
 import { discoverFromReddit } from './modules/discoverReddit.js';
 import { discoverFromRss } from './modules/discoverRss.js';
-import { discoverFromFallback } from './modules/discoverFallback.js';
+import { discoverFromFallback, discoverByFormat } from './modules/discoverFallback.js';
+import { selectNextFormat, formatLabel, usesCuratedList } from './modules/formatSelector.js';
 import { pickBestWord } from './modules/validator.js';
 import { lookupWord } from './modules/dictionaryLookup.js';
 import { generateScript } from './modules/scriptGenerator.js';
@@ -30,12 +31,15 @@ const log = moduleLogger('pipeline');
  */
 export async function runPipeline(options: CLIOptions): Promise<PipelineItem | null> {
   const startTime = Date.now();
-  log.info({ options }, '🚀 Pipeline starting');
+
+  // ── Determine format ─────────────────────────────────────────────────────
+  const format = selectNextFormat(options.format);
+  log.info({ options, format, formatLabel: formatLabel(format) }, '🚀 Pipeline starting');
 
   let item: PipelineItem | null = null;
 
   try {
-    // ── STAGE 1: DISCOVER ──────────────────────────────────────────────
+    // ── STAGE 1: DISCOVER ────────────────────────────────────────────────
 
     let candidates: WordCandidate[];
 
@@ -50,6 +54,14 @@ export async function runPipeline(options: CLIOptions): Promise<PipelineItem | n
         source: 'manual',
         discoveredAt: new Date().toISOString(),
       }];
+    } else if (usesCuratedList(format)) {
+      // emotional-word, funny-meaning, misused-word all have curated lists
+      log.info({ format }, 'Using format-specific curated word list');
+      candidates = await discoverByFormat(format, 15);
+      if (candidates.length === 0) {
+        log.info('Format-specific list exhausted — falling back to general curated list');
+        candidates = await discoverFromFallback(15);
+      }
     } else if (options.source === 'fallback') {
       candidates = await discoverFromFallback(15);
     } else if (options.source === 'reddit') {
@@ -85,7 +97,7 @@ export async function runPipeline(options: CLIOptions): Promise<PipelineItem | n
 
     log.info({ candidateCount: candidates.length }, 'Candidates discovered');
 
-    // ── STAGE 2: VALIDATE & PICK BEST ──────────────────────────────────
+    // ── STAGE 2: VALIDATE & PICK BEST ───────────────────────────────────
 
     let word: string;
     let ipa: string | undefined;
@@ -93,7 +105,7 @@ export async function runPipeline(options: CLIOptions): Promise<PipelineItem | n
     let partOfSpeech: string | undefined;
 
     if (options.word) {
-      // For manual words, still look up but don't reject
+      // For manual words, still look up but don't reject on quality
       const dict = await lookupWord(options.word);
       word = options.word;
       ipa = dict.ipa;
@@ -116,13 +128,15 @@ export async function runPipeline(options: CLIOptions): Promise<PipelineItem | n
     item = insertWord(word, candidate.source, candidate.sourceUrl, candidate.subreddit);
     updateWord(item.id, { status: 'validated', ipa, definition, partOfSpeech });
 
-    log.info({ word, ipa, definition: definition.slice(0, 60) }, '✓ Word validated');
+    log.info({ word, ipa, definition: definition.slice(0, 60), format }, '✓ Word validated');
 
-    // ── STAGE 3: GENERATE SCRIPT ───────────────────────────────────────
+    // ── STAGE 3: GENERATE SCRIPT ─────────────────────────────────────────
 
-    const script = await generateScript(word, {
-      word, exists: true, ipa, definition, partOfSpeech,
-    });
+    const script = await generateScript(
+      word,
+      { word, exists: true, ipa, definition, partOfSpeech },
+      format   // ← pass format here
+    );
 
     updateWord(item.id, {
       status: 'scripted',
@@ -132,22 +146,23 @@ export async function runPipeline(options: CLIOptions): Promise<PipelineItem | n
 
     log.info({
       word,
-      hook: script.hook.slice(0, 50),
+      format: script.format,
+      hook: script.hook.slice(0, 60),
       duration: script.estimatedDuration,
     }, '✓ Script generated');
 
     if (options.dryRun) {
-      log.info({ word, script }, '🏁 DRY RUN complete — stopping before TTS');
+      log.info({ word, format, script }, '🏁 DRY RUN complete — stopping before TTS');
       updateWord(item.id, { status: 'scripted' });
       return { ...item, status: 'scripted', script } as PipelineItem;
     }
 
-    // ── STAGE 3b: FETCH BACKGROUND VIDEO ─────────────────────────────
+    // ── STAGE 3b: FETCH BACKGROUND VIDEO ────────────────────────────────
     // Runs in parallel with TTS — fetch contextual Pexels video
 
     const bgVideoPromise = fetchBackground(word, definition);
 
-    // ── STAGE 4: TTS ───────────────────────────────────────────────────
+    // ── STAGE 4: TTS ──────────────────────────────────────────────────────
 
     const ttsResult = await generateTTS(script, word, item.id);
     updateWord(item.id, {
@@ -161,8 +176,8 @@ export async function runPipeline(options: CLIOptions): Promise<PipelineItem | n
       captions: ttsResult.captions?.length ?? 0,
     }, '✓ TTS complete');
 
-    // ── STAGE 4b: SCHEDULE SFX ──────────────────────────────────────────
-    // Compute timing in seconds from frame timings used by render
+    // ── STAGE 4b: SCHEDULE SFX ────────────────────────────────────────────
+
     const FPS = 30;
     const hookWords = script.hook.split(/\s+/).length;
     const pronWords = script.pronunciation.split(/\s+/).length;
@@ -182,7 +197,7 @@ export async function runPipeline(options: CLIOptions): Promise<PipelineItem | n
 
     log.info({ sfxCount: sfxEvents.length }, '✓ SFX scheduled');
 
-    // ── STAGE 5: AUDIO MIX ─────────────────────────────────────────────
+    // ── STAGE 5: AUDIO MIX ────────────────────────────────────────────────
 
     const audioMix = await mixAudio(
       ttsResult.audioPath, ttsResult.durationSec, word, item.id,
@@ -196,7 +211,7 @@ export async function runPipeline(options: CLIOptions): Promise<PipelineItem | n
 
     log.info({ duration: audioMix.durationSec, track: audioMix.musicTrack }, '✓ Audio mixed');
 
-    // ── STAGE 6: RENDER VIDEO ──────────────────────────────────────────
+    // ── STAGE 6: RENDER VIDEO ─────────────────────────────────────────────
 
     // Resolve background video (started in parallel with TTS)
     const bgVideoPath = await bgVideoPromise;
@@ -224,7 +239,7 @@ export async function runPipeline(options: CLIOptions): Promise<PipelineItem | n
 
     log.info({ videoPath, durationSec }, '✓ Video rendered');
 
-    // ── STAGE 7: UPLOAD ────────────────────────────────────────────────
+    // ── STAGE 7: UPLOAD ───────────────────────────────────────────────────
 
     if (options.noUpload) {
       log.info('⏭  Skipping upload (--no-upload flag)');
@@ -246,6 +261,7 @@ export async function runPipeline(options: CLIOptions): Promise<PipelineItem | n
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     log.info({
       word,
+      format: script.format,
       videoId: uploadResult.videoId,
       url: uploadResult.url,
       elapsed: `${elapsed}s`,

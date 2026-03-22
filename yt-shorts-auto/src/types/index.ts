@@ -1,3 +1,13 @@
+// ─── Format Types ───────────────────────────────────────────────────────────
+
+/** The content format / style of a Short */
+export type ShortFormat =
+  | 'word-of-the-day'   // classic: hook → word → definition → CTA
+  | 'misused-word'      // "Affect vs Effect in 20 seconds"
+  | 'funny-meaning'     // "The English word for someone who loves rain"
+  | 'emotional-word'    // petrichor, sonder, hiraeth — feelings you couldn't name
+  | 'guess-the-word';   // interactive: definition first → pause → reveal
+
 // ─── Core pipeline interfaces ───────────────────────────────────────────────
 
 /** Status of a word as it moves through the pipeline */
@@ -51,6 +61,9 @@ export interface ShortScript {
   cta: string;           // 2–3 s CTA, e.g. "Follow for more fun words!"
   fullText: string;      // Concatenated script for TTS
   estimatedDuration: number; // seconds (word count / ~2.5 words per sec)
+  format: ShortFormat;       // which content format this script uses
+  pauseAfterHook?: boolean;  // for guess-the-word: insert a pause before reveal
+  versusWord?: string;       // for misused-word: the word it's commonly confused with
 }
 
 /** A single word with timing from TTS subtitles */
@@ -88,39 +101,39 @@ export interface PipelineItem {
   id: string;             // UUID
   word: string;
   status: PipelineStatus;
-  
+
   // Discovery
   source: WordCandidate['source'];
   sourceUrl?: string;
   subreddit?: string;
-  
+
   // Dictionary
   ipa?: string;
   definition?: string;
   partOfSpeech?: string;
-  
+
   // Validation
   qualityScore?: number;
-  
+
   // Script
   hook?: string;
   script?: ShortScript;
-  
+
   // Audio
   voiceoverPath?: string;
   mixedAudioPath?: string;
   musicTrack?: string;
-  
+
   // Video
   videoPath?: string;
   thumbnailPath?: string;
   durationSec?: number;
-  
+
   // Upload
   youtubeVideoId?: string;
   youtubeUrl?: string;
   uploadedAt?: string;
-  
+
   // Meta
   createdAt: string;
   updatedAt: string;
@@ -188,4 +201,5 @@ export interface CLIOptions {
   verbose: boolean;
   batch: number;          // --batch=3 to produce multiple videos in one run
   schedule?: string;      // --schedule "9:10pm GMT" — ISO datetime for scheduled publish
+  format?: ShortFormat;   // --format=emotional-word to force a specific format
 }

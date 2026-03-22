@@ -37,6 +37,9 @@ const COMMON_WORDS = new Set([
   'income', 'budget', 'couple', 'county', 'nature', 'summer', 'winter',
   'spring', 'autumn', 'ground', 'island', 'forest', 'bridge', 'street',
   'corner', 'castle', 'center', 'church', 'circle', 'colour', 'column',
+
+  // Manually blacklisted as too basic for this channel
+  'request',
 ]);
 
 // ── Quality Scoring ────────────────────────────────────────────────────────

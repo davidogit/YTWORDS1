@@ -1,10 +1,11 @@
 /**
- * discoverFallback.ts — Fallback word discovery when Reddit is unavailable.
+ * discoverFallback.ts — Fallback word discovery when Reddit / RSS is unavailable.
  *
  * Sources:
- *   1. Random Word API (https://random-word-api.herokuapp.com)
- *   2. Wordnik Random Words (if API key is set)
- *   3. Curated "interesting words" list (built-in)
+ *   1. Format-specific curated lists (emotional, funny, misused)
+ *   2. Random Word API (https://random-word-api.herokuapp.com)
+ *   3. Wordnik Random Words (if API key is set)
+ *   4. General curated "interesting words" list (built-in)
  */
 
 import { config } from '../config.js';
@@ -12,11 +13,74 @@ import { moduleLogger } from '../utils/logger.js';
 import { isDuplicate } from '../utils/db.js';
 import { withRetry } from '../utils/retry.js';
 import type { WordCandidate } from '../types/index.js';
+import type { ShortFormat } from '../types/index.js';
 
 const log = moduleLogger('discoverFallback');
 
-// ── Curated interesting words — pre-vetted for "wow" factor ───────────────
-// ~200 words organised by theme; shuffled at runtime for variety.
+// ── Emotional / untranslatable words ──────────────────────────────────────
+// Words that describe feelings people have but couldn't name.
+// These are the highest-performing format.
+
+export const EMOTIONAL_WORDS: readonly string[] = [
+  'petrichor', 'sonder', 'hiraeth', 'saudade', 'limerence',
+  'vellichor', 'chrysalism', 'onism', 'monachopsis', 'liberosis',
+  'jouska', 'ellipsism', 'altschmerz', 'occhiolism', 'kenopsia',
+  'vemödalen', 'anecdoche', 'nodus', 'exulansis', 'zenosyne',
+  'opia', 'kuebiko', 'lachesism', 'rubatosis', 'énouement',
+  'adronitis', 'catoptric', 'rückkehr', 'pâro', 'mauerbauertraurigkeit',
+  'ambedo', 'avenoir', 'daguerreologue', 'koinophobia', 'vellichor',
+  'desiderium', 'sehnsucht', 'meraki', 'wanderlust', 'wabi',
+  'mono', 'aware', 'yugen', 'gezelligheid', 'hygge',
+  'fernweh', 'weltschmerz', 'schadenfreude', 'torschlusspanik', 'schnapsidee',
+  'forelsket', 'gigil', 'mamihlapinatapai', 'natsukashii', 'wabi-sabi',
+];
+
+// ── Funny / oddly specific English words ─────────────────────────────────
+// Real words with unexpectedly specific or hilarious meanings.
+
+export const FUNNY_MEANING_WORDS: readonly string[] = [
+  'bumfuzzle', 'cattywampus', 'collywobbles', 'flibbertigibbet',
+  'lollygag', 'malarkey', 'nincompoop', 'pettifogger', 'skedaddle',
+  'snollygoster', 'taradiddle', 'whippersnapper', 'absquatulate',
+  'fudgel', 'crapulence', 'griffonage', 'blatherskite', 'callipygian',
+  'erinaceous', 'jentacular', 'selcouth', 'yarborough', 'widdershins',
+  'ultracrepidarian', 'impignorate', 'quire', 'ninnyhammer', 'hobbledehoy',
+  'lickspittle', 'skullduggery', 'muckraker', 'balderdash', 'codswallop',
+  'flapdoodle', 'rigmarole', 'tomfoolery', 'shenanigans', 'kerfuffle',
+  'brouhaha', 'hullabaloo', 'discombobulate', 'flummox', 'bamboozle',
+  'gobsmacked', 'flabbergasted', 'befuddled', 'persnickety', 'lackadaisical',
+  'lollipop', 'snickerdoodle', 'bumfuzzle', 'widdershins', 'flibbertigibbet',
+];
+
+// ── Misused word pairs ─────────────────────────────────────────────────────
+// Common words people confuse or misuse. The pipeline uses `target` as the
+// word to look up, `versus` as the one it's confused with.
+
+export const MISUSED_WORD_PAIRS: readonly { target: string; versus: string }[] = [
+  { target: 'affect',       versus: 'effect' },
+  { target: 'fewer',        versus: 'less' },
+  { target: 'who',          versus: 'whom' },
+  { target: 'lie',          versus: 'lay' },
+  { target: 'imply',        versus: 'infer' },
+  { target: 'comprise',     versus: 'compose' },
+  { target: 'disinterested', versus: 'uninterested' },
+  { target: 'envy',         versus: 'jealousy' },
+  { target: 'literally',    versus: 'figuratively' },
+  { target: 'ironic',       versus: 'coincidental' },
+  { target: 'nauseous',     versus: 'nauseated' },
+  { target: 'peruse',       versus: 'skim' },
+  { target: 'bemused',      versus: 'amused' },
+  { target: 'infamous',     versus: 'famous' },
+  { target: 'fortuitous',   versus: 'fortunate' },
+  { target: 'enormity',     versus: 'enormousness' },
+  { target: 'nonplussed',   versus: 'unfazed' },
+  { target: 'ambiguous',    versus: 'ambivalent' },
+  { target: 'aggravate',    versus: 'irritate' },
+  { target: 'anxious',      versus: 'eager' },
+];
+
+// ── General curated "interesting words" ───────────────────────────────────
+// Pre-vetted for the word-of-the-day / guess-the-word formats.
 
 export const CURATED_WORDS: readonly string[] = [
   // ── Original classics ──────────────────────────────────────────────────
@@ -87,6 +151,56 @@ export const CURATED_WORDS: readonly string[] = [
 /** Set version for O(1) curated-word lookups in the validator */
 export const CURATED_WORDS_SET = new Set(CURATED_WORDS);
 
+// ── Format-aware discovery ────────────────────────────────────────────────
+
+/**
+ * Discover word candidates from the correct curated list for a given format.
+ * Falls back to general curated list for word-of-the-day / guess-the-word.
+ */
+export async function discoverByFormat(
+  format: ShortFormat,
+  limit = 10
+): Promise<WordCandidate[]> {
+  log.info({ format }, 'Discovering words from format-specific curated list');
+
+  let wordPool: string[];
+
+  if (format === 'emotional-word') {
+    wordPool = [...EMOTIONAL_WORDS].sort(() => Math.random() - 0.5);
+  } else if (format === 'funny-meaning') {
+    wordPool = [...FUNNY_MEANING_WORDS].sort(() => Math.random() - 0.5);
+  } else if (format === 'misused-word') {
+    wordPool = [...MISUSED_WORD_PAIRS]
+      .sort(() => Math.random() - 0.5)
+      .map((p) => p.target);
+  } else {
+    // word-of-the-day / guess-the-word — use the general curated list
+    wordPool = [...CURATED_WORDS].sort(() => Math.random() - 0.5);
+  }
+
+  const candidates: WordCandidate[] = [];
+  const seen = new Set<string>();
+
+  for (const word of wordPool) {
+    if (seen.has(word)) continue;
+    seen.add(word);
+    if (word.length < config.content.minWordLength) continue;
+    if (word.length > config.content.maxWordLength) continue;
+    if (isDuplicate(word)) continue;
+
+    candidates.push({
+      word,
+      source: 'fallback',
+      discoveredAt: new Date().toISOString(),
+    });
+
+    if (candidates.length >= limit) break;
+  }
+
+  log.info({ count: candidates.length, format }, 'Format-specific discovery complete');
+  return candidates;
+}
+
 // ── Random Word API ────────────────────────────────────────────────────────
 
 async function fetchRandomWords(count = 20): Promise<string[]> {
@@ -136,7 +250,6 @@ export async function discoverFromFallback(limit = 10): Promise<WordCandidate[]>
   ]);
 
   // Curated words come FIRST — they're pre-vetted as interesting.
-  // API words follow as supplementary options.
   const shuffled = [...CURATED_WORDS].sort(() => Math.random() - 0.5);
   allWords.push(...shuffled);
   allWords.push(...randomWords, ...wordnikWords);

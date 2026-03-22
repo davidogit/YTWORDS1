@@ -8,22 +8,12 @@
  *
  * Features:
  *   - Resumable upload (handles network interruptions)
- *   - Automatic metadata (title, description, tags, category)
+ *   - Format-aware metadata (title, description, tags, category)
  *   - Shorts-optimized: #Shorts hashtag, vertical aspect ratio
  *
  * ⚠️ YouTube API Quota: Default is 10,000 units/day.
  *    Each upload costs ~1,600 units. That's ~6 uploads/day max.
  *    Request quota increase if you need more.
- *
- * Setup instructions:
- *   1. Go to https://console.cloud.google.com
- *   2. Create a project (or use existing)
- *   3. Enable "YouTube Data API v3"
- *   4. Create OAuth 2.0 credentials (Desktop app type)
- *   5. Download client_secret.json — extract client_id and client_secret
- *   6. Set YT_CLIENT_ID, YT_CLIENT_SECRET in .env
- *   7. Run `npm run setup:oauth` and follow the browser flow
- *   8. Copy the refresh_token to YT_REFRESH_TOKEN in .env
  */
 
 import { google } from 'googleapis';
@@ -31,7 +21,7 @@ import { createReadStream, statSync } from 'fs';
 import { config } from '../config.js';
 import { moduleLogger } from '../utils/logger.js';
 import { withRetry, isRetryableNetworkError } from '../utils/retry.js';
-import type { ShortScript } from '../types/index.js';
+import type { ShortScript, ShortFormat } from '../types/index.js';
 
 const log = moduleLogger('uploader');
 
@@ -43,12 +33,7 @@ function getOAuth2Client() {
     config.youtube.clientSecret,
     config.youtube.redirectUri
   );
-
-  // Set the refresh token — googleapis will auto-refresh access tokens
-  oauth2.setCredentials({
-    refresh_token: config.youtube.refreshToken,
-  });
-
+  oauth2.setCredentials({ refresh_token: config.youtube.refreshToken });
   return oauth2;
 }
 
@@ -58,7 +43,6 @@ function cap(s: string) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-/** Seeded shuffle so the same word always picks consistently within a run */
 function pick<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
@@ -72,43 +56,67 @@ function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
-// ── Title Templates ─────────────────────────────────────────────────────────
-// 15 distinct formats — varied tone: curious, challenge, discovery, education, fun
+// ── Title Templates — Format-Aware ────────────────────────────────────────
+//
+// Based on proven patterns:
+//   Bad:  "Word of the Day: Reticent"
+//   Good: "You know this feeling. The word is Reticent."
+//   Best: "Everyone feels this. Few know the word."
 
-function generateTitle(word: string, hook: string): string {
-  // Pull a short hook excerpt (first ~6 words) for some templates
-  const hookSnip = hook.split(/\s+/).slice(0, 6).join(' ').replace(/[?!,]+$/, '');
-
+function generateTitle(word: string, hook: string, format: ShortFormat): string {
   const W = cap(word);
+  const hookSnip = hook.split(/\s+/).slice(0, 7).join(' ').replace(/[?!,."]+$/, '');
 
-  const templates = [
-    // Curiosity / hook-led
-    `${hookSnip}? The word is "${W}" #Shorts`,
-    `There's actually a word for that — "${W}" 🤯`,
-    `You've felt it. Now learn the word: ${W}`,
-    `The word "${W}" will change how you describe things`,
-    // Discovery
-    `Word of the Day: ${W} — Do You Know It?`,
-    `Most people don't know this word: ${W}`,
-    `${W} — A Word That Deserves More Use`,
-    `Ever heard of "${W}"? You should have`,
-    // Challenge / engagement
-    `Can you use "${W}" in a sentence? 🧠`,
-    `Drop "${W}" in a conversation and impress everyone`,
-    // Education / clean
-    `What does "${W}" mean? #shorts #vocabulary`,
-    `${W}: The one English word you're missing`,
-    `Learn "${W}" in 30 seconds #WordOfTheDay`,
-    `${W} — definition, pronunciation & example`,
-    // Fun / emoji-led
-    `✨ "${W}" — today's rare English word`,
-  ];
+  const templatesByFormat: Record<ShortFormat, string[]> = {
+    'word-of-the-day': [
+      `Everyone feels this. Few know the word.`,
+      `You know this feeling. The word is "${W}".`,
+      `Most people don't know this word exists.`,
+      `The word you've been looking for is "${W}"`,
+      `${hookSnip}? The word is ${W}.`,
+      `Stop scrolling. You need to know "${W}".`,
+      `The one word that describes everything.`,
+      `English has a word for this — and it's perfect.`,
+    ],
+    'misused-word': [
+      `You've been using "${W}" wrong your whole life`,
+      `"${W}" does NOT mean what you think`,
+      `Stop misusing "${W}" — here's the real meaning`,
+      `Everyone gets "${W}" wrong. Do you?`,
+      `The word "${W}" doesn't mean what you think`,
+      `I hate to tell you this but you're using "${W}" wrong`,
+    ],
+    'funny-meaning': [
+      `There's actually a word for this 😭`,
+      `The English word for this will surprise you`,
+      `This word sounds made up but it's completely real`,
+      `You didn't know English had a word for this`,
+      `The most specific word in the English language`,
+      `Someone actually named this. I cannot believe it.`,
+    ],
+    'emotional-word': [
+      `There's a word for that feeling you can't describe`,
+      `The word for that emotion you always feel`,
+      `You've felt this. There's a word for it.`,
+      `"${W}" — the emotion you've felt but never named`,
+      `The word for a feeling most people carry silently`,
+      `This word will change how you understand yourself`,
+    ],
+    'guess-the-word': [
+      `Can you guess this word in 3 seconds? 🧠`,
+      `3 seconds to guess this word. Go.`,
+      `Only 1 in 10 people know this word`,
+      `Guess the word before the reveal`,
+      `I bet you can't name this word`,
+      `Most people don't get this. Can you?`,
+    ],
+  };
 
-  return pick(templates).slice(0, 100); // YouTube 100-char title limit
+  const templates = templatesByFormat[format] ?? templatesByFormat['word-of-the-day'];
+  return pick(templates).slice(0, 100);
 }
 
-// ── Description Templates ───────────────────────────────────────────────────
-// 5 structurally different formats — rotated randomly
+// ── Description Templates ──────────────────────────────────────────────────
 
 function generateDescription(
   word: string,
@@ -128,12 +136,11 @@ function generateDescription(
     '🔁 Share this with someone who loves words!',
   ]);
 
-  // Hashtag block — always #Shorts first (helps YouTube classify), then varied
   const hashCore = ['#Shorts', '#WordOfTheDay', '#Vocabulary', '#English', '#LearnEnglish'];
   const hashPool = [
     '#FunFacts', '#DidYouKnow', '#EnglishWords', '#WordNerd', '#Etymology',
     '#DailyWord', '#RareWords', '#EnglishVocabulary', '#WordsOfInstagram',
-    '#Linguistics', '#GrammarNazi', '#BookTok', '#LearnWithMe', '#Education',
+    '#Linguistics', '#BookTok', '#LearnWithMe', '#Education',
     '#EduShorts', '#MindBlown', '#TIL', '#LanguageLearning', '#EnglishLearner',
     `#${word}`,
   ];
@@ -141,8 +148,6 @@ function generateDescription(
   const hashBlock = [...hashCore, ...hashExtra].join(' ');
 
   const formats = [
-
-    // ── Format 1: Lead with the hook, educational tone
     [
       `#Shorts | ${W} ${ipa ? `(${ipa})` : ''}`,
       '',
@@ -156,8 +161,6 @@ function generateDescription(
       '',
       hashBlock,
     ],
-
-    // ── Format 2: Definition-first, clean & structured
     [
       `📚 Word: ${W}`,
       pronLine,
@@ -171,8 +174,6 @@ function generateDescription(
       '',
       hashBlock,
     ],
-
-    // ── Format 3: Conversational / story-led
     [
       `${script.hook}`,
       '',
@@ -186,8 +187,6 @@ function generateDescription(
       `Music: ${music}`,
       hashBlock,
     ],
-
-    // ── Format 4: Punchy, list-style
     [
       `🔤 ${W} ${ipa ? `· ${ipa}` : ''}`,
       `📖 ${definition}`,
@@ -199,8 +198,6 @@ function generateDescription(
       `🎵 ${music}`,
       hashBlock,
     ],
-
-    // ── Format 5: Question-led, engagement-focused
     [
       `Do you know what "${W}" means?`,
       '',
@@ -213,43 +210,42 @@ function generateDescription(
       '',
       hashBlock,
     ],
-
   ];
 
   return pick(formats)
-    .filter((l) => l !== '')  // keep intentional empty lines
+    .filter((l) => l !== '')
     .join('\n')
-    .replace(/\n{3,}/g, '\n\n') // collapse triple+ newlines
+    .replace(/\n{3,}/g, '\n\n')
     .slice(0, 5000);
 }
 
 // ── Tag Generation ──────────────────────────────────────────────────────────
 
-function generateTags(word: string): string[] {
-  // Core tags always included
+function generateTags(word: string, format: ShortFormat): string[] {
   const core = [
     'shorts', 'vocabulary', 'word of the day', 'english', 'learn english',
     word, word.toLowerCase(), cap(word),
   ];
 
-  // Large pool — pick a varied subset each run
+  const formatTags: Record<ShortFormat, string[]> = {
+    'word-of-the-day': ['fun words', 'rare words', 'cool words', 'word nerd', 'etymology'],
+    'misused-word': ['grammar', 'english grammar', 'words people misuse', 'common mistakes', 'english tips'],
+    'funny-meaning': ['funny words', 'weird words', 'english is weird', 'unusual words', 'did you know'],
+    'emotional-word': ['emotional words', 'untranslatable words', 'feelings words', 'describe emotions', 'rare feelings'],
+    'guess-the-word': ['guess the word', 'word quiz', 'vocabulary quiz', 'brain teaser', 'word challenge'],
+  };
+
   const pool = [
-    'fun words', 'english words', 'rare words', 'cool words', 'big words',
-    'new words', 'daily word', 'english vocabulary', 'word nerd', 'etymology',
-    'linguistics', 'grammar', 'language learning', 'english learner',
-    'did you know', 'fun facts', 'education', 'learning', 'mind blown',
+    'english words', 'new words', 'daily word', 'english vocabulary',
+    'linguistics', 'language learning', 'english learner',
     'today i learned', 'til', 'language', 'words to know',
     'improve vocabulary', 'expand vocabulary', 'english lesson',
-    'word meaning', 'definition', 'pronunciation', 'ipa', 'phonetics',
-    'english pronunciation', 'speak english', 'english speaking',
-    'book lover', 'reading', 'writing tips', 'writer', 'logophile',
-    'word lovers', 'bookworm', 'word of the week',
+    'word meaning', 'definition', 'pronunciation',
+    'book lover', 'reading', 'logophile', 'word lovers', 'bookworm',
+    ...(formatTags[format] ?? []),
   ];
 
-  // Pick 20 from pool, shuffle for variety
   const selected = shuffle(pool).slice(0, 20);
-
-  // Deduplicate and cap at 500 chars total (YouTube tag limit is 500 total chars)
   const all = [...new Set([...core, ...selected])];
   const result: string[] = [];
   let charCount = 0;
@@ -271,7 +267,6 @@ export interface UploadResult {
 
 /**
  * Upload a video to YouTube with full metadata.
- * Uses resumable upload for reliability.
  */
 export async function uploadToYouTube(
   videoPath: string,
@@ -283,22 +278,22 @@ export async function uploadToYouTube(
   publishAt?: string
 ): Promise<UploadResult> {
   if (!config.youtube.refreshToken) {
-    throw new Error(
-      'YouTube refresh token not set. Run `npm run setup:oauth` first.'
-    );
+    throw new Error('YouTube refresh token not set. Run `npm run setup:oauth` first.');
   }
 
   const auth = getOAuth2Client();
   const youtube = google.youtube({ version: 'v3', auth });
 
-  const title = generateTitle(word, script.hook);
+  const title = generateTitle(word, script.hook, script.format);
   const description = generateDescription(word, ipa, definition, script, musicCredit);
-  const tags = generateTags(word);
+  const tags = generateTags(word, script.format);
 
   const fileSize = statSync(videoPath).size;
-  log.info({ title, fileSize, privacy: publishAt ? 'private (scheduled)' : config.youtube.privacy, publishAt }, 'Starting YouTube upload');
+  log.info(
+    { title, fileSize, format: script.format, privacy: publishAt ? 'private (scheduled)' : config.youtube.privacy, publishAt },
+    'Starting YouTube upload'
+  );
 
-  // Resumable upload via googleapis
   const result = await withRetry(
     async () => {
       const response = await youtube.videos.insert({
@@ -308,58 +303,47 @@ export async function uploadToYouTube(
             title,
             description,
             tags,
-            categoryId: config.youtube.category, // 27 = Education
+            categoryId: config.youtube.category,
             defaultLanguage: 'en',
             defaultAudioLanguage: 'en',
           },
           status: {
             privacyStatus: publishAt ? 'private' : config.youtube.privacy,
-            // Schedule publish time — YouTube requires private status for scheduled videos
             ...(publishAt ? { publishAt } : {}),
-            // ALWAYS false — content is not made for kids (required for monetization eligibility)
             selfDeclaredMadeForKids: false,
             madeForKids: false,
           },
         },
-        media: {
-          body: createReadStream(videoPath),
-        },
+        media: { body: createReadStream(videoPath) },
       });
-
       return response.data;
     },
     'youtube:upload',
-    {
-      maxAttempts: 3,
-      baseDelayMs: 5000,
-      retryOn: isRetryableNetworkError,
-    }
+    { maxAttempts: 3, baseDelayMs: 5000, retryOn: isRetryableNetworkError }
   );
 
   const videoId = result.id!;
   const url = `https://youtube.com/shorts/${videoId}`;
 
-  log.info({ videoId, url, title }, 'Upload complete ✓');
+  log.info({ videoId, url, title, format: script.format }, 'Upload complete ✓');
 
   return { videoId, url, title };
 }
 
 /**
  * Generate the initial OAuth2 authorization URL.
- * Used by scripts/setup-oauth.ts to get the refresh token.
  */
 export function getAuthUrl(): string {
   const oauth2 = getOAuth2Client();
   return oauth2.generateAuthUrl({
     access_type: 'offline',
     scope: ['https://www.googleapis.com/auth/youtube.upload'],
-    prompt: 'consent', // Force consent to ensure refresh_token is returned
+    prompt: 'consent',
   });
 }
 
 /**
  * Exchange an authorization code for tokens.
- * Used by scripts/setup-oauth.ts after the user authorizes.
  */
 export async function exchangeCode(code: string) {
   const oauth2 = getOAuth2Client();
