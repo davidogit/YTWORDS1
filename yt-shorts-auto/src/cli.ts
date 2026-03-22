@@ -3,22 +3,27 @@
  * cli.ts — Main CLI entrypoint for yt-shorts-auto.
  *
  * Usage:
- *   npm run produce                  # Full pipeline (discover → upload)
- *   npm run produce -- --dry-run     # Stop after script generation
- *   npm run produce -- --no-upload   # Render but don't upload
- *   npm run produce -- --word=susurrus  # Use a specific word
- *   npm run produce -- --source=rss        # RSS feeds (default)
- *   npm run produce -- --source=reddit     # Use Reddit OAuth source
- *   npm run produce -- --source=fallback   # Curated word list only
- *   npm run produce -- --batch 3     # Produce 3 videos in one run
- *   npm run produce -- --verbose     # Debug-level logging
+ *   npm run produce                         # Full pipeline (RSS → upload)
+ *   npm run produce -- --dry-run            # Stop after script generation
+ *   npm run produce -- --no-upload          # Render but don't upload
+ *   npm run produce -- --word=susurrus      # Use a specific word
+ *   npm run produce -- --source=rss         # RSS feeds (default)
+ *   npm run produce -- --source=reddit      # Use Reddit OAuth source
+ *   npm run produce -- --source=fallback    # Curated word list only
+ *   npm run produce -- --batch 3            # Produce 3 videos in one run
+ *   npm run produce -- --verbose            # Debug-level logging
+ *   npm run produce -- --format=emotional-word   # Force a specific format
+ *   npm run produce -- --format=misused-word
+ *   npm run produce -- --format=funny-meaning
+ *   npm run produce -- --format=guess-the-word
+ *   npm run produce -- --format=word-of-the-day
  */
 
 import { Command } from 'commander';
 import { runPipeline } from './pipeline.js';
 import { getStats, closeDb } from './utils/db.js';
 import { logger } from './utils/logger.js';
-import type { CLIOptions, PipelineItem } from './types/index.js';
+import type { CLIOptions, ShortFormat } from './types/index.js';
 
 const program = new Command();
 
@@ -37,6 +42,10 @@ program
   .option('--batch <count>', 'Produce multiple videos in one run', '1')
   .option('--verbose', 'Enable debug logging', false)
   .option('--schedule <datetime>', 'Schedule publish at ISO datetime (e.g. 2026-02-26T21:10:00Z)')
+  .option(
+    '--format <format>',
+    'Content format: word-of-the-day, emotional-word, misused-word, funny-meaning, guess-the-word'
+  )
   .action(async (opts) => {
     if (opts.verbose) {
       logger.level = 'debug';
@@ -51,6 +60,7 @@ program
       verbose: opts.verbose ?? false,
       batch: batchCount,
       schedule: opts.schedule,
+      format: opts.format as ShortFormat | undefined,
     };
 
     const results: Array<{ word: string; status: string; url?: string; error?: string }> = [];
@@ -88,7 +98,10 @@ program
       } catch (err) {
         const errorMsg = (err as Error).message;
         results.push({ word: '(failed)', status: 'failed', error: errorMsg });
-        logger.error({ error: errorMsg, attempt: i + 1 }, 'Pipeline failed for this batch item — continuing');
+        logger.error(
+          { error: errorMsg, attempt: i + 1 },
+          'Pipeline failed for this batch item — continuing'
+        );
       }
 
       // Delay between batch items to avoid rate limiting
@@ -101,13 +114,19 @@ program
     // Print batch summary if more than 1
     if (batchCount > 1) {
       logger.info('\n━━━ BATCH SUMMARY ━━━');
-      const succeeded = results.filter((r) => r.status === 'uploaded' || r.status === 'rendered');
-      const failed = results.filter((r) => r.status === 'failed' || r.status === 'no_result');
+      const succeeded = results.filter(
+        (r) => r.status === 'uploaded' || r.status === 'rendered'
+      );
+      const failed = results.filter(
+        (r) => r.status === 'failed' || r.status === 'no_result'
+      );
       logger.info(`  Produced: ${succeeded.length}/${batchCount}`);
       logger.info(`  Failed:   ${failed.length}/${batchCount}`);
       for (const r of results) {
         const icon = r.status === 'uploaded' ? '✓' : r.status === 'rendered' ? '~' : '✗';
-        logger.info(`  ${icon} ${r.word} — ${r.status}${r.url ? ` — ${r.url}` : ''}${r.error ? ` — ${r.error}` : ''}`);
+        logger.info(
+          `  ${icon} ${r.word} — ${r.status}${r.url ? ` — ${r.url}` : ''}${r.error ? ` — ${r.error}` : ''}`
+        );
       }
       logger.info('━━━━━━━━━━━━━━━━━━━━━');
 
@@ -132,7 +151,6 @@ program
 
 // Default command: run produce
 program.action(async () => {
-  // If no command is specified, run produce
   await program.parseAsync(['node', 'cli', 'produce', ...process.argv.slice(2)]);
 });
 
